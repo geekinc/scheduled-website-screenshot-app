@@ -1,21 +1,65 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Take regular screenshots of a website and store in an S3 bucket. 
-  
+Description: Take regular screenshots of a website and store in an S3 bucket.
+# From https://acloudguru.com/blog/engineering/serverless-browser-automation-with-aws-lambda-and-puppeteer
+# Policy Templates Notes: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-policy-templates.html
+Parameters:
+  Stage:
+    Type: String
+    Default: APIv1
+
 Resources:
   # Define an S3 bucket
   S3Bucket:
-    Type: AWS::S3::Bucket  
+    Type: AWS::S3::Bucket
+
+  # Define new QUEUE
+  InvocationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+
+  # Triggering API Gateway
+  BasicAWSApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: Basic AWS API Gateway
+      StageName: !Ref Stage
+
+  # Triggering Endpoint
+  TriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: trigger.handler
+      Runtime: nodejs12.x
+      Timeout: 30
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          QUEUE_URL: !Ref InvocationQueue
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt InvocationQueue.QueueName
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt InvocationQueue.QueueName
+      Events:
+        TriggerApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BasicAWSApiGateway
+            Path: /trigger
+            Method: GET
 
   # Define the consumer Lambda function and EventBridge rule
-  SnapshotFunction:
+  HandlerFunction:
     Type: AWS::Serverless::Function
     Description: Invoked by EventBridge scheduled rule
     Properties:
       CodeUri: src/
-      Handler: app.handler
+      Handler: handler.handler
       Runtime: nodejs12.x
-      Timeout: 15
+      Timeout: 600 # MAX = 900
       MemorySize: 4096
       Layers:
         - !Sub 'arn:aws:lambda:${AWS::Region}:764866452798:layer:chrome-aws-lambda:22'
@@ -23,17 +67,34 @@ Resources:
         Variables:
           TARGET_URL: 'https://serverlessland.com'
           S3_BUCKET: !Ref S3Bucket
+          REGION: !Ref AWS::Region
+          QUEUE_URL: !Ref InvocationQueue
       Policies:
         - S3WritePolicy:
             BucketName: !Ref S3Bucket
-
+        - SQSPollerPolicy:
+            QueueName: !GetAtt InvocationQueue.QueueName
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt InvocationQueue.QueueName
       Events:
         CheckWebsiteScheduledEvent:
           Type: Schedule
           Properties:
-            Schedule: rate(15 minutes)
+            Schedule: rate(2 minutes)
 
 Outputs:
   ConsumerFunction:
-    Description: SnapshotFunction function name
-    Value: !Ref SnapshotFunction
+    Description: HandlerFunction function name
+    Value: !Ref HandlerFunction
+  BasicAWSApiGateway:
+    Description: 'API Gateway endpoint URL for Staging stage for trigger function'
+    Value: !Sub 'https://${BasicAWSApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/trigger'
+  BasicAWSApiGatewayRestApiId:
+    Description: 'API Gateway ARN for Basic AWS API Gateway'
+    Value: !Ref BasicAWSApiGateway
+    Export:
+      Name: BasicAWSApiGateway-RestApiId
+  BasicAWSApiGatewayRootResourceId:
+    Value: !GetAtt BasicAWSApiGateway.RootResourceId
+    Export:
+      Name: BasicAWSApiGateway-RootResourceId
